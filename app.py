@@ -1,6 +1,6 @@
 from __future__ import annotations
 import re
-from typing import List, Tuple
+from typing import List
 from urllib.parse import urlparse
 
 import requests
@@ -14,7 +14,15 @@ try:
 except Exception:
     trafilatura = None
 
-app = FastAPI(title="URL→売れる説明文 API", version="1.0.0")
+# ==============================
+# FastAPI 設定
+# ==============================
+app = FastAPI(
+    title="URL→売れる説明文 API",
+    version="1.0.1",
+    servers=[{"url": "https://sell-copy-api.onrender.com"}],  # ← あなたのURL
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,7 +37,11 @@ HEADERS = {
     )
 }
 
+# ==============================
+# ドメイン別抽出ルール
+# ==============================
 DOMAIN_RULES: dict[str, dict[str, List[str]]] = {
+    # --- 楽天 ---
     "item.rakuten.co.jp": {
         "include": [
             "#itemDesc", "#item_description", "#productDetail",
@@ -41,6 +53,7 @@ DOMAIN_RULES: dict[str, dict[str, List[str]]] = {
             "#privacy", "#attention", ".product-review", "#voice"
         ],
     },
+    # --- BASE / beerbeerbeer.beer ---
     "beerbeerbeer.beer": {
         "include": [
             ".item-detail__description", ".item-detail__body",
@@ -52,6 +65,24 @@ DOMAIN_RULES: dict[str, dict[str, List[str]]] = {
             ".payment", ".return"
         ],
     },
+    # --- NEW: shopselect.net 対応 ---
+    "shopselect.net": {
+        "include": [
+            ".item-detail__description",
+            ".product-detail__body",
+            ".item-description",
+            ".item_detail_text",
+            ".description",
+            "#item-detail",
+            "article .description",
+            "section.item_detail_text"
+        ],
+        "exclude": [
+            ".review", "#review", ".faq", ".policy", ".shipping",
+            ".payment", ".return", ".attention", ".terms"
+        ],
+    },
+    # --- 汎用 ---
     "generic": {
         "include": [
             "[data-product-description]", ".product-description",
@@ -68,40 +99,9 @@ DOMAIN_RULES: dict[str, dict[str, List[str]]] = {
     },
 }
 
-TONES = {
-    "standard": {"adj": ["わかりやすい", "実用的", "誠実"], "exclam": ""},
-    "premium": {"adj": ["上質", "洗練", "特別"], "exclam": "。"},
-    "casual": {"adj": ["カジュアル", "気軽", "毎日"], "exclam": "！"},
-    "witty": {"adj": ["遊び心", "ちょい攻め", "記憶に残る"], "exclam": "！"},
-}
-
-PLATFORM_HINTS = {
-    "rakuten": {"cta": "今すぐカートに入れる"},
-    "amazon": {"cta": "今すぐ購入"},
-    "base": {"cta": "カートに入れる"},
-    "shopify": {"cta": "Add to Cart"},
-    "instagram": {"cta": "プロフィールのリンクから"},
-    "x": {"cta": "詳細はリンクへ"},
-}
-
-
-class ExtractRequest(BaseModel):
-    url: AnyHttpUrl
-    platform: str | None = "base"
-    tone: str | None = "standard"
-    char_limit: int | None = None
-    keywords: list[str] | None = None
-    brand: str | None = None
-    price: str | None = None
-    cta: bool | None = True
-
-
-class ExtractResponse(BaseModel):
-    success: bool
-    raw_description: str
-    sales_copy_md: str
-
-
+# ==============================
+# テキスト抽出ユーティリティ
+# ==============================
 def fetch_html(url: str, timeout: int = 20) -> str:
     resp = requests.get(url, headers=HEADERS, timeout=timeout)
     resp.raise_for_status()
@@ -110,7 +110,7 @@ def fetch_html(url: str, timeout: int = 20) -> str:
     return resp.text
 
 
-def _remove_unwanted_nodes(soup: BeautifulSoup, exclude_selectors: List[str]) -> None:
+def _remove_unwanted_nodes(soup: BeautifulSoup, exclude_selectors: list[str]) -> None:
     for tag in soup(["script", "style", "noscript", "svg", "iframe"]):
         tag.decompose()
     for c in soup.find_all(string=lambda t: isinstance(t, Comment)):
@@ -144,20 +144,44 @@ def extract_description(url: str) -> str:
             text = _collapse_whitespace(text)
             if len(text) > 80:
                 return text
+
+    # フォールバック: trafilatura
+    if trafilatura:
+        extracted = trafilatura.extract(html, include_comments=False, include_images=False)
+        if extracted:
+            cleaned = _collapse_whitespace(extracted)
+            if len(cleaned) >= 80:
+                return cleaned
     raise ValueError("商品説明を抽出できませんでした。")
 
+# ==============================
+# コピー生成ロジック
+# ==============================
+TONES = {
+    "standard": {"adj": ["わかりやすい", "実用的", "誠実"], "exclam": ""},
+    "premium": {"adj": ["上質", "洗練", "特別"], "exclam": "。"},
+    "casual": {"adj": ["カジュアル", "気軽", "毎日"], "exclam": "！"},
+    "witty": {"adj": ["遊び心", "ちょい攻め", "記憶に残る"], "exclam": "！"},
+}
+
+PLATFORM_HINTS = {
+    "rakuten": {"cta": "今すぐカートに入れる"},
+    "amazon": {"cta": "今すぐ購入"},
+    "base": {"cta": "カートに入れる"},
+    "shopify": {"cta": "Add to Cart"},
+    "instagram": {"cta": "プロフィールのリンクから"},
+    "x": {"cta": "詳細はリンクへ"},
+}
 
 def build_sales_copy(src: str, tone: str, platform: str, brand=None, price=None) -> str:
     tone_map = TONES.get(tone, TONES["standard"])
     cta = PLATFORM_HINTS.get(platform, PLATFORM_HINTS["base"])["cta"]
-
     title = src.split("\n")[0][:60]
     body = f"{title}は、{tone_map['adj'][1]}な仕上がりで、日常を{tone_map['adj'][2]}に彩ります。"
     if brand:
         body += f" ブランド: {brand}。"
     if price:
         body += f" 価格の目安: {price}。"
-
     out = [
         f"# {title}",
         f"**{title} — {tone_map['adj'][0]}な一品**{tone_map['exclam']}",
@@ -173,6 +197,22 @@ def build_sales_copy(src: str, tone: str, platform: str, brand=None, price=None)
     ]
     return "\n".join(out)
 
+# ==============================
+# APIエンドポイント
+# ==============================
+class ExtractRequest(BaseModel):
+    url: AnyHttpUrl
+    platform: str | None = "base"
+    tone: str | None = "standard"
+    brand: str | None = None
+    price: str | None = None
+
+
+class ExtractResponse(BaseModel):
+    success: bool
+    raw_description: str
+    sales_copy_md: str
+
 
 @app.post("/extract-and-copy", response_model=ExtractResponse)
 def extract_and_copy(req: ExtractRequest):
@@ -183,34 +223,16 @@ def extract_and_copy(req: ExtractRequest):
         raise HTTPException(status_code=422, detail=str(e))
     return ExtractResponse(success=True, raw_description=raw, sales_copy_md=md)
 
-
-
+# ==============================
+# プライバシーポリシー（公開用）
+# ==============================
 from fastapi.responses import HTMLResponse
-
 PRIVACY_HTML = """
-<!doctype html><meta charset="utf-8">
-<title>プライバシーポリシー</title>
+<!doctype html><meta charset="utf-8"><title>プライバシーポリシー</title>
 <h1>プライバシーポリシー</h1>
-<p>本API（URL→売れる説明文API）は、ユーザーが送信した商品URLおよび派生テキストを
-API処理の目的で一時的に扱います。個人情報（氏名・住所・決済情報など）を意図的に収集しません。</p>
-<h2>収集するデータ</h2>
-<ul>
-<li>入力された商品URL</li>
-<li>サーバーログ（アクセス日時/リクエスト元IP等、Render/ホスティングの標準ログ）</li>
-</ul>
-<h2>利用目的</h2>
-<ul>
-<li>商品説明テキストの抽出・文章生成の提供</li>
-<li>品質改善・障害対応（エラーログ解析など）</li>
-</ul>
-<h2>第三者提供</h2>
-<p>法令に基づく場合を除き、個人を特定できる形で第三者に提供しません。</p>
-<h2>データ保管</h2>
-<p>サーバーログはホスティングの保持期間に従い、自動的に削除されます。アプリ側で永続保存は行いません。</p>
-<h2>お問い合わせ</h2>
-<p>ポリシーに関するお問い合わせは、<a href="mailto:ai@maf-tech.jp">ai@maf-tech.jp</a> までご連絡ください。</p>
+<p>本APIは商品ページのURLとその説明文を処理しますが、個人情報を保存・共有しません。</p>
+<p>運営者連絡先: ai@maf-tech.jp</p>
 """
-
 @app.get("/privacy", include_in_schema=False)
 def privacy():
     return HTMLResponse(PRIVACY_HTML)
