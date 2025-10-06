@@ -182,3 +182,35 @@ def extract_and_copy(req: ExtractRequest):
     except Exception as e:
         raise HTTPException(status_code=422, detail=str(e))
     return ExtractResponse(success=True, raw_description=raw, sales_copy_md=md)
+
+
+
+from fastapi.responses import HTMLResponse
+
+PRIVACY_HTML = """
+<!doctype html><meta charset="utf-8">
+<title>プライバシーポリシー</title>
+<h1>プライバシーポリシー</h1>
+<p>本API（URL→売れる説明文API）は、ユーザーが送信した商品URLおよび派生テキストを
+API処理の目的で一時的に扱います。個人情報（氏名・住所・決済情報など）を意図的に収集しません。</p>
+<h2>収集するデータ</h2>
+<ul>
+<li>入力された商品URL</li>
+<li>サーバーログ（アクセス日時/リクエスト元IP等、Render/ホスティングの標準ログ）</li>
+</ul>
+<h2>利用目的</h2>
+<ul>
+<li>商品説明テキストの抽出・文章生成の提供</li>
+<li>品質改善・障害対応（エラーログ解析など）</li>
+</ul>
+<h2>第三者提供</h2>
+<p>法令に基づく場合を除き、個人を特定できる形で第三者に提供しません。</p>
+<h2>データ保管</h2>
+<p>サーバーログはホスティングの保持期間に従い、自動的に削除されます。アプリ側で永続保存は行いません。</p>
+<h2>お問い合わせ</h2>
+<p>ポリシーに関するお問い合わせは、<a href="mailto:ai@maf-tech.jp">ai@maf-tech.jp</a> までご連絡ください。</p>
+"""
+
+@app.get("/privacy", include_in_schema=False)
+def privacy():
+    return HTMLResponse(PRIVACY_HTML)
